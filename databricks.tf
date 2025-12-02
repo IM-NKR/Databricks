@@ -119,7 +119,7 @@ resource "databricks_notebook" "bnr_toggle" {
 
 #StageToLoad Workflow
 
-resource "databricks_job" "bnr_toggle" {
+resource "databricks_job" "Northlink-Hist-StageToLoad" {
 
     name = var.job_name1
     description = var.job_description1
@@ -590,6 +590,885 @@ resource "databricks_job" "bnr_toggle" {
 }
 
 #LoadToTrans Workflow
+resource "databricks_job" "Northlink-Hist-LoadToTrans" 
+{
+
+    name = var.job_name
+    description = var.job_description
+    timeout_seconds = var.job_timeout_seconds
+
+    job_cluster 
+    {
+        job_cluster_key = var.cluster_name
+
+        new_cluster 
+        {
+            num_workers = var.num_workers
+            spark.version = var.spark.version
+            node_type_id = var.worker_instance_type
+            driver_node_type_id = var.driver_instance_type
+            policy_id = var.cluster_policy_id
+            runtime_engine = "STANDARD"
+            data_security_mode = "SINGLE_USER"
+
+            autoscale 
+            {
+                min_workers = var.min_workers
+                max_workers = var.max_workers
+            }
+
+            aws_attributes 
+            {
+                instance_profile_arn = var.instance_profile_arn
+                first_on_demand = var.first_on_demand
+                availability = var.availability
+                zone_id = var.zone_id
+                spot_bid_price_percent = var.spot_bid_price_percent
+            }
+
+            spark_conf 
+            {
+                "spark.dtabricks.hive.metastore.glueCatalog.enabled":"true",
+                "spark.hadoop.hive.metastore.glue.catalogid": local.catalogid,
+                "s[ark.hadoop.aws.region":"us-east-1",
+                "spark.hadoop.fs.s3a.acl.default":"BucketOwnerFullControl"
+            }
+
+            custom_tags = local.cluster_tags
+        }
+    }
+    email_notifications
+    {
+        on_start = var.email_on_start
+        on_success = var.email_on_success
+        on_failure = var.email_on_failure
+    }
+
+    task 
+    {
+        task_key = "setRunTimeParams"
+        job_cluster_key = var.cluster_name
+        notebook_task 
+        {
+            notebook_path = "/apps/${var.env_name}/BIModDomainNorthlink/python/stage_to_transform/setRunTimeParams"
+            base_parameters = {
+                env = var.env_name
+                job_name = "{{job.name}}"
+                job_run_id = "{{job.run_id}}"
+                load_type = "hist"
+                task_name = "{{task.name}}"
+                task_run_id = "{{task.run_id}}"
+                transform_check_flag = "M"
+            }
+        }
+        timeout_seconds = 1800
+    }
+
+    task 
+    {
+        task_key = "acctNumbercheck"
+        depends_on 
+        {
+            task_key = "setRunTimeParams"
+        }
+        run_if = "ALL_SUCCESS"
+        job_cluster_key = var.cluster_name
+        notebook_task 
+        {
+            notebook_path = "/apps/${var.env_name}/BIModDomainNorthlink/python/stage_to_transform/acctNumbercheck"
+            base_parameters = {
+                env = var.env_name
+                job_name = "{{job.name}}"
+                job_run_id = "{{job.run_id}}"
+                task_name = "{{task.name}}"
+                task_run_id = "{{task.run_id}}"
+            }
+        }
+        timeout_seconds = 1800
+    }
+
+    task 
+    {
+        task_key = "masterLoad"
+        depends_on 
+        {
+            task_key = "acctNumbercheck"
+        }
+        run_if = "ALL_SUCCESS"
+        job_cluster_key = var.cluster_name
+        notebook_task 
+        {
+            notebook_path = "/apps/${var.env_name}/BIModDomainNorthlink/python/stage_to_transform/masterLoad"
+            base_parameters = {
+                env = var.env_name
+                job_name = "{{job.name}}"
+                job_run_id = "{{job.run_id}}"
+                task_name = "{{task.name}}"
+                task_run_id = "{{task.run_id}}"
+            }
+        }
+        timeout_seconds = 1800
+    }
+
+    task 
+    {
+        task_key = "trans-Pol_Evnt"
+        depends_on 
+        {
+            task_key = "masterLoad"
+        }
+        depends_on 
+        {
+            task_key = "acctNumbercheck"
+        }
+        run_if = "ALL_SUCCESS"
+        job_cluster_key = var.cluster_name
+        notebook_task 
+        {
+            notebook_path = "/apps/${var.env_name}/BIModDomainNorthlink/python/stage_to_transform/transPol_Evnt"
+            base_parameters = {
+                env = var.env_name
+                job_name = "{{job.name}}"
+                job_run_id = "{{job.run_id}}"
+                task_name = "{{task.name}}"
+                task_run_id = "{{task.run_id}}"
+            }
+        }
+        timeout_seconds = 1800
+    }
+
+    task 
+    {
+        task_key = "PolEvntDataCheck"
+
+        depends_on
+        {
+            task_key = "trans-Pol_Evnt"
+        }
+
+        run_if = "ALL_DONE"
+
+        condition_task 
+        {
+            op = "EQUAL_TO"
+            left = "{{task.trans-Pol_Evnt.values.trans_data_flag}}"
+            right = "true"
+        }
+    }
+
+    task 
+    {
+        task_key = "batchControl-NoDataUpdate"
+
+        depends_on
+        {
+            task_key = "PolEvntDataCheck"
+            outcome = "true"
+        }
+        run_if = "ALL_SUCCESS"
+
+        job_cluster_key = var.cluster_name
+        notebook_task 
+        {
+            notebook_path = "/apps/${var.env_name}/BIModDomainNorthlink/python/stage_to_transform/batchControlUpdate"
+            base_parameters = {
+                job_name = "{{job.name}}"
+                job_run_id = "{{job.run_id}}"
+                task_name = "{{task.name}}"
+                task_run_id = "{{task.run_id}}"
+                refine_flag = "Y"
+                stage_flag = "Y"
+                transform_flag = "Y"
+                update_type = "no_data"
+            }
+        }
+        timeout_seconds = 1800
+    }
+
+    task 
+    {
+        task_key = "trans-Pol"
+        depends_on 
+        {
+            task_key = "PolEvntDataCheck"
+            outcome = "false"
+        }
+        job_cluster_key = var.cluster_name
+        notebook_task 
+        {
+            notebook_path = "/apps/${var.env_name}/BIModDomainNorthlink/python/stage_to_transform/transPol"
+            base_parameters = {
+                env = var.env_name
+                job_name = "{{job.name}}"
+                job_run_id = "{{job.run_id}}"
+                task_name = "{{task.name}}"
+                task_run_id = "{{task.run_id}}"
+            }
+        }
+        timeout_seconds = 1800
+    }
+
+     task 
+    {
+        task_key = "trans-Party"
+        depends_on 
+        {
+            task_key = "trans-Pol"
+        }
+        run_if = "ALL_SUCCESS"
+        job_cluster_key = var.cluster_name
+        notebook_task 
+        {
+            notebook_path = "/apps/${var.env_name}/BIModDomainNorthlink/python/stage_to_transform/transPol_Pty_Role"
+            base_parameters = {
+                env = var.env_name
+                job_name = "{{job.name}}"
+                job_run_id = "{{job.run_id}}"
+                task_name = "{{task.name}}"
+                task_run_id = "{{task.run_id}}"
+            }
+        }
+        timeout_seconds = 1800
+    }
+
+    task 
+    {
+        task_key = "trans-Pol_prdct_ln"
+        depends_on 
+        {
+            task_key = "trans-Pol"
+        }
+        run_if = "ALL_SUCCESS"
+        job_cluster_key = var.cluster_name
+        notebook_task 
+        {
+            notebook_path = "/apps/${var.env_name}/BIModDomainNorthlink/python/stage_to_transform/transPol_Prdct_Ln"
+            base_parameters = {
+                env = var.env_name
+                job_name = "{{job.name}}"
+                job_run_id = "{{job.run_id}}"
+                task_name = "{{task.name}}"
+                task_run_id = "{{task.run_id}}"
+            }
+        }
+        timeout_seconds = 1800
+    }
+
+    task 
+    {
+        task_key = "trans-Pol_risk_geo_loc"
+        depends_on 
+        {
+            task_key = "trans-Pol"
+        }
+        run_if = "ALL_SUCCESS"
+        job_cluster_key = var.cluster_name
+        notebook_task 
+        {
+            notebook_path = "/apps/${var.env_name}/BIModDomainNorthlink/python/stage_to_transform/transPol_Risk_Geo_Loc"
+            base_parameters = {
+                env = var.env_name
+                job_name = "{{job.name}}"
+                job_run_id = "{{job.run_id}}"
+                task_name = "{{task.name}}"
+                task_run_id = "{{task.run_id}}"
+            }
+        }
+        timeout_seconds = 1800
+    }
+
+    task 
+    {
+        task_key = "updateBalanceControl-TransLayer"
+
+        depends_on
+        {
+            task_key = "PolEvntDataCheck"
+            outcome = "false"
+        }
+        run_if = "ALL_SUCCESS"
+
+        job_cluster_key = var.cluster_name
+        notebook_task 
+        {
+            notebook_path = "/apps/${var.env_name}/BIModDomainNorthlink/python/stage_to_transform/updateBalanceControl"
+            base_parameters = {
+                layer = "trans"
+                job_name = "{{job.name}}"
+                job_run_id = "{{job.run_id}}"
+                task_name = "{{task.name}}"
+                task_run_id = "{{task.run_id}}"
+            }
+        }
+        timeout_seconds = 1800
+    }
+
+    task 
+    {
+        task_key = "TransformBnrConditionCheck"
+
+        depends_on
+        {
+            task_key = "PolEvntDataCheck"
+            outcome = "false"
+        }
+
+        run_if = "ALL_SUCCESS"
+
+        condition_task 
+        {
+            op = "EQUAL_TO"
+            left = "{{task.setRunTimeParams.values.bnr_check}}"
+            right = "Yes"
+        }
+    }
+
+     task 
+    {
+        task_key = "TransformBNR_SDK"
+
+        depends_on
+        {
+            task_key = "TransformBnrConditionCheck"
+            outcome = "true"
+        }
+        run_if = "ALL_SUCCESS"
+
+        job_cluster_key = var.cluster_name
+        notebook_task 
+        {
+            notebook_path = "/apps/${var.env_name}/BIModDomainNorthlink/python/stage_to_transform/BNR/bnr_code"
+            base_parameters = {
+                job_name = "{{job.name}}"
+                job_run_id = "{{job.run_id}}"
+                task_name = "{{task.name}}"
+                task_run_id = "{{task.run_id}}"
+                assumeFlag = "Y"
+                controlPointCategory_name = "DATA_DOMAIN"
+                dataLayer = "TRANSFORM"
+                dataSourceAppsCode = "NLINK"
+                env = var.env_name
+                source_nm = "NLINK"
+                frequency = "HISTORY"
+            }
+        }
+
+        library
+        {
+            pypi {
+                package = "pyarrow"
+            }
+        }
+        library
+        {
+            pypi {
+                package = "snowflake-connector-python"
+            }
+        }
+        library
+        {
+            pypi {
+                package = "openpyxl"
+            }
+        }
+        timeout_seconds = 1800
+    }
+
+    task 
+    {
+        task_key = "TransformLayerBNRPass"
+
+        depends_on
+        {
+            task_key = "TransformBNR_SDK"
+        }
+        depends_on
+        {
+            task_key = "TransformBnrConditionCheck"
+            outcome = "false"
+        }
+
+        run_if = "AT_LEAST_ONE_SUCCESS"
+        notebook_task 
+        {
+            notebook_path = "/apps/${var.env_name}/BIModDomainNorthlink/python/stage_to_transform/Pass"
+        }
+    }
+
+    task 
+    {
+        task_key = "batchControl-SuccessUpdate"
+
+        depends_on
+        {
+            task_key = "TransformLayerBNRPass"
+        }
+        depends_on
+        {
+            task_key = "updateBalanceControl-TransLayer"
+        }
+        depends_on
+        {
+            task_key = "trans-Pol_risk_geo_loc"
+        }
+        depends_on
+        {
+            task_key = "trans-Pol_prdct_ln"
+        }
+        depends_on
+        {
+            task_key = "trans-Party"
+        }
+        run_if = "ALL_SUCCESS"
+
+        job_cluster_key = var.cluster_name
+        notebook_task 
+        {
+            notebook_path = "/apps/${var.env_name}/BIModDomainNorthlink/python/stage_to_transform/batchControlUpdate"
+            base_parameters = {
+                job_name = "{{job.name}}"
+                job_run_id = "{{job.run_id}}"
+                task_name = "{{task.name}}"
+                task_run_id = "{{task.run_id}}"
+                refine_flag = "N"
+                stage_flag = "Y"
+                transform_flag = "Y"
+                update_type = "success"
+            }
+        }
+        timeout_seconds = 1800
+    }
+
+    task 
+    {
+        task_key = "batchControl-FailureUpdate"
+
+        depends_on
+        {
+            task_key = "batchControl-SuccessUpdate"
+        }
+        run_if = "AT_LEAST_ONE_FAILED"
+
+        job_cluster_key = var.cluster_name
+        notebook_task 
+        {
+            notebook_path = "/apps/${var.env_name}/BIModDomainNorthlink/python/stage_to_transform/batchControlUpdate"
+            base_parameters = {
+                job_name = "{{job.name}}"
+                job_run_id = "{{job.run_id}}"
+                task_name = "{{task.name}}"
+                task_run_id = "{{task.run_id}}"
+                refine_flag = "N"
+                stage_flag = "Y"
+                transform_flag = "N"
+                update_type = "failure"
+            }
+        }
+        timeout_seconds = 1800
+    }
+
+     task 
+    {
+        task_key = "TranstoRefine"
+        depends_on 
+        {
+            task_key = "batchControl-SuccessUpdate"
+        }
+        run_if = "ALL_SUCCESS"
+        run_job_task {
+            job_id = databricks.Northlink-Hist-TransToRefine.id
+        }
+    }
+
+    tags = module.tags.common_tags
+}
 
 
 #TransToRefine Workflow
+resource "databricks_job" "Northlink-Hist-TransToRefine" 
+{
+
+    name = var.job_name
+    description = var.job_description
+    timeout_seconds = var.job_timeout_seconds
+
+    job_cluster 
+    {
+        job_cluster_key = var.cluster_name
+
+        new_cluster 
+        {
+            num_workers = var.num_workers
+            spark.version = var.spark.version
+            node_type_id = var.worker_instance_type
+            driver_node_type_id = var.driver_instance_type
+            policy_id = var.cluster_policy_id
+            runtime_engine = "STANDARD"
+            data_security_mode = "SINGLE_USER"
+
+            autoscale 
+            {
+                min_workers = var.min_workers
+                max_workers = var.max_workers
+            }
+
+            aws_attributes 
+            {
+                instance_profile_arn = var.instance_profile_arn
+                first_on_demand = var.first_on_demand
+                availability = var.availability
+                zone_id = var.zone_id
+                spot_bid_price_percent = var.spot_bid_price_percent
+            }
+
+            spark_conf 
+            {
+                "spark.dtabricks.hive.metastore.glueCatalog.enabled":"true",
+                "spark.hadoop.hive.metastore.glue.catalogid": local.catalogid,
+                "s[ark.hadoop.aws.region":"us-east-1",
+                "spark.hadoop.fs.s3a.acl.default":"BucketOwnerFullControl"
+            }
+
+            custom_tags = local.cluster_tags
+        }
+    }
+    email_notifications
+    {
+        on_start = var.email_on_start
+        on_success = var.email_on_success
+        on_failure = var.email_on_failure
+    }
+
+    task 
+    {
+        task_key = "setRunTimeParams"
+        job_cluster_key = var.cluster_name
+        notebook_task 
+        {
+            notebook_path = "/apps/${var.env_name}/BIModDomainNorthlink/python/transform_to_refined/setRunTimeParams"
+            base_parameters = {
+                env = var.env_name
+                job_name = "{{job.name}}"
+                job_run_id = "{{job.run_id}}"
+                load_type = "hist"
+                task_name = "{{task.name}}"
+                task_run_id = "{{task.run_id}}"
+                transform_check_flag = "Y"
+            }
+        }
+        timeout_seconds = 1800
+    }
+
+    task 
+    {
+        task_key = "POL"
+        depends_on 
+        {
+            task_key = "setRunTimeParams"
+        }
+        run_if = "ALL_SUCCESS"
+        job_cluster_key = var.cluster_name
+        notebook_task 
+        {
+            notebook_path = "/apps/${var.env_name}/BIModDomainNorthlink/python/transform_to_refined/main"
+            base_parameters = {
+                env = var.env_name
+                job_name = "{{job.name}}"
+                job_run_id = "{{job.run_id}}"
+                table_name = "POL"
+                task_name = "{{task.name}}"
+                task_run_id = "{{task.run_id}}"
+            }
+        }
+        timeout_seconds = 1800
+    }
+
+    task 
+    {
+        task_key = "POL_EVN"
+        depends_on 
+        {
+            task_key = "setRunTimeParams"
+        }
+        run_if = "ALL_SUCCESS"
+        job_cluster_key = var.cluster_name
+        notebook_task 
+        {
+            notebook_path = "/apps/${var.env_name}/BIModDomainNorthlink/python/transform_to_refined/main"
+            base_parameters = {
+                job_name = "{{job.name}}"
+                job_run_id = "{{job.run_id}}"
+                table_name = "POL_EVNT"
+                task_name = "{{task.name}}"
+                task_run_id = "{{task.run_id}}"
+            }
+        }
+        timeout_seconds = 1800
+    }
+
+    task 
+    {
+        task_key = "POL_PRDCT_LN"
+        depends_on 
+        {
+            task_key = "setRunTimeParams"
+        }
+        run_if = "ALL_SUCCESS"
+        job_cluster_key = var.cluster_name
+        notebook_task 
+        {
+            notebook_path = "/apps/${var.env_name}/BIModDomainNorthlink/python/transform_to_refined/main"
+            base_parameters = {
+                job_name = "{{job.name}}"
+                job_run_id = "{{job.run_id}}"
+                table_name = "POL_PRDCT_LN"
+                task_name = "{{task.name}}"
+                task_run_id = "{{task.run_id}}"
+            }
+        }
+        timeout_seconds = 1800
+    }
+
+    task 
+    {
+        task_key = "POL_PTY_ROLE"
+        depends_on 
+        {
+            task_key = "setRunTimeParams"
+        }
+        run_if = "ALL_SUCCESS"
+        job_cluster_key = var.cluster_name
+        notebook_task 
+        {
+            notebook_path = "/apps/${var.env_name}/BIModDomainNorthlink/python/transform_to_refined/main"
+            base_parameters = {
+                job_name = "{{job.name}}"
+                job_run_id = "{{job.run_id}}"
+                table_name = "POL_PTY_ROLE"
+                task_name = "{{task.name}}"
+                task_run_id = "{{task.run_id}}"
+            }
+        }
+        timeout_seconds = 1800
+    }
+
+    task 
+    {
+        task_key = "POL_PTY_ROLE_NM"
+        depends_on 
+        {
+            task_key = "setRunTimeParams"
+        }
+        run_if = "ALL_SUCCESS"
+        job_cluster_key = var.cluster_name
+        notebook_task 
+        {
+            notebook_path = "/apps/${var.env_name}/BIModDomainNorthlink/python/transform_to_refined/main"
+            base_parameters = {
+                job_name = "{{job.name}}"
+                job_run_id = "{{job.run_id}}"
+                table_name = "POL_PTY_ROLE_NM"
+                task_name = "{{task.name}}"
+                task_run_id = "{{task.run_id}}"
+            }
+        }
+        timeout_seconds = 1800
+    }
+
+    task 
+    {
+        task_key = "POL_RISK_GEO_LOC"
+        depends_on 
+        {
+            task_key = "setRunTimeParams"
+        }
+        run_if = "ALL_SUCCESS"
+        job_cluster_key = var.cluster_name
+        notebook_task 
+        {
+            notebook_path = "/apps/${var.env_name}/BIModDomainNorthlink/python/transform_to_refined/main"
+            base_parameters = {
+                job_name = "{{job.name}}"
+                job_run_id = "{{job.run_id}}"
+                table_name = "POL_RISK_GEO_LOC"
+                task_name = "{{task.name}}"
+                task_run_id = "{{task.run_id}}"
+            }
+        }
+        timeout_seconds = 1800
+    }
+
+    task 
+    {
+        task_key = "updateBalanceControl-RefineLayer"
+        depends_on 
+        {
+            task_key = "POL_EVNT"
+        }
+        run_if = "ALL_SUCCESS"
+        job_cluster_key = var.cluster_name
+        notebook_task 
+        {
+            notebook_path = "/apps/${var.env_name}/BIModDomainNorthlink/python/transform_to_refined/updateBalanceControl"
+            base_parameters = {
+                job_name = "{{job.name}}"
+                job_run_id = "{{job.run_id}}"
+                layer = "refine"
+                task_name = "{{task.name}}"
+                task_run_id = "{{task.run_id}}"
+            }
+        }
+        timeout_seconds = 1800
+    }
+
+    task 
+    {
+        task_key = "RefineBnrConditionCheck"
+
+        depends_on
+        {
+            task_key = "POL_EVNT"
+        }
+
+        run_if = "ALL_SUCCESS"
+        condition_task 
+        {
+            op = "EQUAL_TO"
+            left = "{{task.setRunTimeParams.values.bnr_check}}"
+            right = "Yes"
+        }
+    }
+
+     task 
+    {
+        task_key = "RefineBNR_SDK"
+
+        depends_on
+        {
+            task_key = "RefineBnrConditionCheck"
+            outcome = "true"
+        }
+        run_if = "ALL_SUCCESS"
+
+        job_cluster_key = var.cluster_name
+        notebook_task 
+        {
+            notebook_path = "/apps/${var.env_name}/BIModDomainNorthlink/python/transform_to_refined/BNR/bnr_code"
+            base_parameters = {
+                job_name = "{{job.name}}"
+                job_run_id = "{{job.run_id}}"
+                task_name = "{{task.name}}"
+                task_run_id = "{{task.run_id}}"
+                assumeFlag = "Y"
+                controlPointCategory_name = "DATA_DOMAIN"
+                dataLayer = "REFINE"
+                dataSourceAppsCode = "NLINK"
+                env = var.env_name
+                source_nm = "NLINK"
+                frequency = "HISTORY"
+            }
+        }
+
+        library
+        {
+            pypi {
+                package = "pyarrow"
+            }
+        }
+        library
+        {
+            pypi {
+                package = "snowflake-connector-python"
+            }
+        }
+        library
+        {
+            pypi {
+                package = "openpyxl"
+            }
+        }
+        timeout_seconds = 1800
+    }
+    
+    task 
+    {
+        task_key = "batchControl-SuccessUpdate"
+
+        depends_on
+        {
+            task_key = "POL"
+        }
+        depends_on
+        {
+            task_key = "updateBalanceControl-RefineLayer"
+        }
+        depends_on
+        {
+            task_key = "POL_RISK_GEO_LOC"
+        }
+        depends_on
+        {
+            task_key = "POL_PTY_ROLE_NM"
+        }
+        depends_on
+        {
+            task_key = "POL_PTY_ROLE"
+        }
+        depends_on
+        {
+            task_key = "POL_PRDCT_LN"
+        }
+        run_if = "ALL_SUCCESS"
+
+        job_cluster_key = var.cluster_name
+        notebook_task 
+        {
+            notebook_path = "/apps/${var.env_name}/BIModDomainNorthlink/python/transform_to_refined/batchControlUpdate"
+            base_parameters = {
+                job_name = "{{job.name}}"
+                job_run_id = "{{job.run_id}}"
+                task_name = "{{task.name}}"
+                task_run_id = "{{task.run_id}}"
+                refine_flag = "Y"
+                stage_flag = "Y"
+                transform_flag = "Y"
+                update_type = "success"
+            }
+        }
+        timeout_seconds = 1800
+    }
+
+    task 
+    {
+        task_key = "batchControl-FailureUpdate"
+
+        depends_on
+        {
+            task_key = "batchControl-SuccessUpdate"
+        }
+        depends_on
+        {
+            task_key = "RefineBNR_SDK"
+        }
+        run_if = "AT_LEAST_ONE_FAILED"
+
+        job_cluster_key = var.cluster_name
+        notebook_task 
+        {
+            notebook_path = "/apps/${var.env_name}/BIModDomainNorthlink/python/transform_to_refined/batchControlUpdate"
+            base_parameters = {
+                job_name = "{{job.name}}"
+                job_run_id = "{{job.run_id}}"
+                task_name = "{{task.name}}"
+                task_run_id = "{{task.run_id}}"
+                refine_flag = "N"
+                stage_flag = "Y"
+                transform_flag = "Y"
+                update_type = "failure"
+            }
+        }
+        timeout_seconds = 1800
+    }
+
+    tags = module.tags.common_tags
+}
